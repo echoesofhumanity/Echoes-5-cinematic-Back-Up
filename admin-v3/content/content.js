@@ -1,0 +1,854 @@
+(function () {
+    "use strict";
+
+    const db = window.db;
+
+    if (!db) {
+        console.error(
+            "Admin V3 Content: Supabase client is not available."
+        );
+        return;
+    }
+
+    const state = {
+        items: [],
+        currentItem: null,
+        editing: false,
+        initialized: false,
+        loading: false
+    };
+
+    const CONTENT_TYPES = [
+        "story",
+        "essay",
+        "manifesto",
+        "poetry",
+        "audio",
+        "visual",
+        "technical",
+        "blueprint"
+    ];
+
+    const CONTENT_STATUSES = [
+        "draft",
+        "review",
+        "published",
+        "archived"
+    ];
+
+    function requireViewPermission() {
+        if (!window.EchoesAdminPermissions) {
+            throw new Error(
+                "Admin V3 Content: Permissions module is not available."
+            );
+        }
+
+        if (
+            !window.EchoesAdminPermissions.hasPermission(
+                "content.view"
+            )
+        ) {
+            throw new Error(
+                "Admin V3 Content: View permission is required."
+            );
+        }
+    }
+
+    function requireManagePermission() {
+        if (!window.EchoesAdminPermissions) {
+            throw new Error(
+                "Admin V3 Content: Permissions module is not available."
+            );
+        }
+
+        if (
+            !window.EchoesAdminPermissions.hasPermission(
+                "content.manage"
+            )
+        ) {
+            throw new Error(
+                "Admin V3 Content: Manage permission is required."
+            );
+        }
+    }
+
+    function validateType(type) {
+        if (!CONTENT_TYPES.includes(type)) {
+            throw new Error(
+                "Admin V3 Content: Invalid content type."
+            );
+        }
+    }
+
+    function validateStatus(status) {
+        if (!CONTENT_STATUSES.includes(status)) {
+            throw new Error(
+                "Admin V3 Content: Invalid content status."
+            );
+        }
+    }
+
+    function normalizeContentData(data) {
+        if (!data || typeof data !== "object") {
+            throw new Error(
+                "Admin V3 Content: Content data is required."
+            );
+        }
+
+        const normalized = {
+            title: data.title || null,
+            slug: data.slug || null,
+            subtitle: data.subtitle || null,
+            summary: data.summary || null,
+            body: data.body || null,
+            type: data.type || "story",
+            status: data.status || "draft",
+            language: data.language || null,
+            region_code: data.region_code || null,
+            category_id: data.category_id || null,
+            tags: Array.isArray(data.tags)
+                ? data.tags
+                : [],
+            cover_image_url:
+                data.cover_image_url || null,
+            file_path: data.file_path || null,
+            featured: Boolean(data.featured),
+            translation_group_id:
+                data.translation_group_id || null
+        };
+
+        validateType(normalized.type);
+        validateStatus(normalized.status);
+
+        if (!normalized.title) {
+            throw new Error(
+                "Admin V3 Content: Title is required."
+            );
+        }
+
+        if (!normalized.slug) {
+            throw new Error(
+                "Admin V3 Content: Slug is required."
+            );
+        }
+
+        return normalized;
+    }
+
+    async function loadContent(options) {
+        requireViewPermission();
+
+        const settings = options || {};
+
+        state.loading = true;
+
+        try {
+            let query = db
+                .from("content_items")
+                .select(`
+                    id,
+                    title,
+                    slug,
+                    subtitle,
+                    summary,
+                    body,
+                    type,
+                    status,
+                    language,
+                    region_code,
+                    category_id,
+                    tags,
+                    cover_image_url,
+                    file_path,
+                    featured,
+                    views_count,
+                    published_at,
+                    created_at,
+                    updated_at,
+                    translation_group_id
+                `)
+                .order("created_at", {
+                    ascending: false
+                });
+
+            if (settings.status) {
+                validateStatus(settings.status);
+
+                query = query.eq(
+                    "status",
+                    settings.status
+                );
+            }
+
+            if (settings.type) {
+                validateType(settings.type);
+
+                query = query.eq(
+                    "type",
+                    settings.type
+                );
+            }
+
+            if (settings.language) {
+                query = query.eq(
+                    "language",
+                    settings.language
+                );
+            }
+
+            if (settings.categoryId) {
+                query = query.eq(
+                    "category_id",
+                    settings.categoryId
+                );
+            }
+
+            if (settings.featured !== undefined) {
+                query = query.eq(
+                    "featured",
+                    Boolean(settings.featured)
+                );
+            }
+
+            const { data, error } =
+                await query;
+
+            if (error) {
+                console.error(
+                    "Admin V3 Content: Failed to load content.",
+                    error
+                );
+
+                throw error;
+            }
+
+            state.items = data || [];
+
+            return getItems();
+        } finally {
+            state.loading = false;
+        }
+    }
+
+    async function getContentById(id) {
+        requireViewPermission();
+
+        if (!id) {
+            throw new Error(
+                "Admin V3 Content: Content ID is required."
+            );
+        }
+
+        const { data, error } =
+            await db
+                .from("content_items")
+                .select(`
+                    id,
+                    title,
+                    slug,
+                    subtitle,
+                    summary,
+                    body,
+                    type,
+                    status,
+                    language,
+                    region_code,
+                    category_id,
+                    tags,
+                    cover_image_url,
+                    file_path,
+                    featured,
+                    views_count,
+                    published_at,
+                    created_at,
+                    updated_at,
+                    translation_group_id
+                `)
+                .eq("id", id)
+                .single();
+
+        if (error) {
+            console.error(
+                "Admin V3 Content: Failed to load content item.",
+                error
+            );
+
+            throw error;
+        }
+
+        state.currentItem = data;
+
+        return data;
+    }
+
+    async function createContent(data) {
+        requireManagePermission();
+
+        const content =
+            normalizeContentData(data);
+
+        const { data: created, error } =
+            await db
+                .from("content_items")
+                .insert(content)
+                .select()
+                .single();
+
+        if (error) {
+            console.error(
+                "Admin V3 Content: Failed to create content.",
+                error
+            );
+
+            throw error;
+        }
+
+        state.currentItem = created;
+        state.items = [
+            created,
+            ...state.items
+        ];
+
+        return created;
+    }
+
+    async function updateContent(id, data) {
+        requireManagePermission();
+
+        if (!id) {
+            throw new Error(
+                "Admin V3 Content: Content ID is required."
+            );
+        }
+
+        const content =
+            normalizeContentData(data);
+
+        const { data: updated, error } =
+            await db
+                .from("content_items")
+                .update(content)
+                .eq("id", id)
+                .select()
+                .single();
+
+        if (error) {
+            console.error(
+                "Admin V3 Content: Failed to update content.",
+                error
+            );
+
+            throw error;
+        }
+
+        state.currentItem = updated;
+
+        state.items = state.items.map(
+            function (item) {
+                return item.id === id
+                    ? updated
+                    : item;
+            }
+        );
+
+        return updated;
+    }
+
+    async function updateStatus(id, status) {
+        requireManagePermission();
+
+        if (!id) {
+            throw new Error(
+                "Admin V3 Content: Content ID is required."
+            );
+        }
+
+        validateStatus(status);
+
+        const updateData = {
+            status
+        };
+
+        if (status === "published") {
+            updateData.published_at =
+                new Date().toISOString();
+        } else {
+            updateData.published_at = null;
+        }
+
+        const { data: updated, error } =
+            await db
+                .from("content_items")
+                .update(updateData)
+                .eq("id", id)
+                .select()
+                .single();
+
+        if (error) {
+            console.error(
+                "Admin V3 Content: Failed to update content status.",
+                error
+            );
+
+            throw error;
+        }
+
+        state.currentItem = updated;
+
+        state.items = state.items.map(
+            function (item) {
+                return item.id === id
+                    ? updated
+                    : item;
+            }
+        );
+
+        return updated;
+    }
+
+    async function deleteContent(id) {
+        requireManagePermission();
+
+        if (!id) {
+            throw new Error(
+                "Admin V3 Content: Content ID is required."
+            );
+        }
+
+        const { error } =
+            await db
+                .from("content_items")
+                .delete()
+                .eq("id", id);
+
+        if (error) {
+            console.error(
+                "Admin V3 Content: Failed to delete content.",
+                error
+            );
+
+            throw error;
+        }
+
+        state.items = state.items.filter(
+            function (item) {
+                return item.id !== id;
+            }
+        );
+
+        if (
+            state.currentItem &&
+            state.currentItem.id === id
+        ) {
+            state.currentItem = null;
+        }
+
+        return true;
+    }
+
+    function setCurrentItem(item) {
+        state.currentItem = item || null;
+
+        return state.currentItem;
+    }
+
+    function getItems() {
+        return state.items.slice();
+    }
+
+    function getCurrentItem() {
+        return state.currentItem;
+    }
+
+    function getTypes() {
+        return CONTENT_TYPES.slice();
+    }
+
+    function getStatuses() {
+        return CONTENT_STATUSES.slice();
+    }
+
+    function isLoading() {
+        return state.loading;
+    }
+
+    function getState() {
+        return {
+            items: state.items.slice(),
+            currentItem: state.currentItem,
+            initialized: state.initialized,
+            loading: state.loading,
+            editing: state.editing
+        };
+    }
+
+    async function initialize() {
+        if (state.initialized) {
+            return getState();
+        }
+
+        if (!window.EchoesAdminPermissions) {
+            throw new Error(
+                "Admin V3 Content: Permissions module is not available."
+            );
+        }
+
+        state.initialized = true;
+
+        return getState();
+    }
+
+    function getFormElement(id) {
+        return document.getElementById(id);
+    }
+
+    function showFormMessage(message, isError) {
+        const box = getFormElement("contentFormMessage");
+
+        if (!box) {
+            return;
+        }
+
+        box.textContent = message || "";
+        box.classList.toggle("visible", Boolean(message));
+        box.classList.toggle("error", Boolean(isError));
+    }
+
+    async function loadCategoryOptions() {
+        const select = getFormElement("contentCategory");
+
+        if (!select || !window.EchoesAdminCategories) {
+            return;
+        }
+
+        try {
+            await window.EchoesAdminCategories.loadCategories();
+
+            const categories =
+                window.EchoesAdminCategories.getItems();
+
+            select.innerHTML =
+                '<option value="">No category</option>';
+
+            categories.forEach(function (category) {
+                const option =
+                    document.createElement("option");
+
+                option.value = category.id;
+                option.textContent = category.name;
+
+                select.appendChild(option);
+            });
+        } catch (error) {
+            console.error(
+                "Admin V3 Content: Failed to load category options.",
+                error
+            );
+
+            showFormMessage(
+                "Categories could not be loaded.",
+                true
+            );
+        }
+    }
+
+    function readFormData() {
+        const tagsValue =
+            getFormElement("contentTags").value;
+
+        return {
+            title:
+                getFormElement("contentTitle").value.trim(),
+            slug:
+                getFormElement("contentSlug").value.trim(),
+            subtitle:
+                getFormElement("contentSubtitle").value.trim(),
+            summary:
+                getFormElement("contentSummary").value.trim(),
+            body:
+                getFormElement("contentBody").value,
+            type:
+                getFormElement("contentType").value,
+            language:
+                getFormElement("contentLanguage").value,
+            region_code:
+                getFormElement("contentRegion").value.trim() || "EU",
+            category_id:
+                getFormElement("contentCategory").value || null,
+            tags:
+                tagsValue
+                    .split(",")
+                    .map(function (tag) {
+                        return tag.trim();
+                    })
+                    .filter(Boolean),
+            cover_image_url:
+                getFormElement("contentCover").value.trim(),
+            file_path:
+                getFormElement("contentFile").value.trim(),
+            featured:
+                getFormElement("contentFeatured").checked
+        };
+    }
+
+    function setEditMode(enabled) {
+        const title = document.querySelector(
+            "#module-content .module-title"
+        );
+
+        const draftButton =
+            getFormElement("saveDraftButton");
+
+        const publishButton =
+            getFormElement("publishButton");
+
+        state.editing = Boolean(enabled);
+
+        if (title) {
+            title.textContent = state.editing
+                ? "Edit Content"
+                : "New Content";
+        }
+
+        if (draftButton) {
+            draftButton.textContent = state.editing
+                ? "Save Changes"
+                : "Save Draft";
+        }
+
+        if (publishButton) {
+            publishButton.textContent = "Publish";
+        }
+    }
+
+    function fillForm(item) {
+        if (!item) {
+            return;
+        }
+
+        getFormElement("contentTitle").value =
+            item.title || "";
+        getFormElement("contentSlug").value =
+            item.slug || "";
+        getFormElement("contentSubtitle").value =
+            item.subtitle || "";
+        getFormElement("contentType").value =
+            item.type || "story";
+        getFormElement("contentLanguage").value =
+            item.language || "en";
+        getFormElement("contentRegion").value =
+            item.region_code || "EU";
+        getFormElement("contentCategory").value =
+            item.category_id || "";
+        getFormElement("contentTags").value =
+            Array.isArray(item.tags)
+                ? item.tags.join(", ")
+                : "";
+        getFormElement("contentSummary").value =
+            item.summary || "";
+        getFormElement("contentBody").value =
+            item.body || "";
+        getFormElement("contentCover").value =
+            item.cover_image_url || "";
+        getFormElement("contentFile").value =
+            item.file_path || "";
+        getFormElement("contentFeatured").checked =
+            Boolean(item.featured);
+    }
+
+    async function enterEditMode(item) {
+        if (!item) {
+            throw new Error(
+                "Admin V3 Content: Content item is required for editing."
+            );
+        }
+
+        await loadCategoryOptions();
+        fillForm(item);
+        setEditMode(true);
+        showFormMessage(
+            "Editing content record.",
+            false
+        );
+    }
+
+    function exitEditMode() {
+        state.currentItem = null;
+        setEditMode(false);
+
+        const form = getFormElement("contentForm");
+
+        if (form) {
+            form.reset();
+        }
+
+        getFormElement("contentRegion").value = "EU";
+    }
+
+    async function saveForm(status) {
+        showFormMessage("", false);
+        setButtonsDisabled(true);
+
+        try {
+            const data = readFormData();
+            data.status = status;
+
+            if (state.editing && state.currentItem) {
+                await updateContent(
+                    state.currentItem.id,
+                    data
+                );
+
+                showFormMessage(
+                    status === "published"
+                        ? "Content published successfully."
+                        : "Content updated successfully.",
+                    false
+                );
+
+                exitEditMode();
+            } else {
+                await createContent(data);
+
+                showFormMessage(
+                    status === "published"
+                        ? "Content published successfully."
+                        : "Draft saved successfully.",
+                    false
+                );
+
+                const form = getFormElement("contentForm");
+
+                if (form) {
+                    form.reset();
+                }
+
+                getFormElement("contentRegion").value = "EU";
+            }
+        } catch (error) {
+            console.error(
+                "Admin V3 Content: Form submission failed.",
+                error
+            );
+
+            showFormMessage(
+                error.message ||
+                    "Unable to save content.",
+                true
+            );
+        } finally {
+            setButtonsDisabled(false);
+        }
+    }
+
+    function setButtonsDisabled(disabled) {
+        const draft =
+            getFormElement("saveDraftButton");
+
+        const publish =
+            getFormElement("publishButton");
+
+        if (draft) {
+            draft.disabled = disabled;
+        }
+
+        if (publish) {
+            publish.disabled = disabled;
+        }
+    }
+
+    function bindContentForm() {
+        const form =
+            getFormElement("contentForm");
+
+        if (!form || form.dataset.bound === "true") {
+            return;
+        }
+
+        form.dataset.bound = "true";
+
+        getFormElement("saveDraftButton")
+            .addEventListener("click", function () {
+                saveForm(
+                    state.editing && state.currentItem
+                        ? state.currentItem.status
+                        : "draft"
+                );
+            });
+
+        getFormElement("publishButton")
+            .addEventListener("click", function () {
+                saveForm("published");
+            });
+    }
+
+    async function initializeContentUI() {
+        bindContentForm();
+        await loadCategoryOptions();
+    }
+
+    window.EchoesAdminContent = {
+        initialize,
+        loadContent,
+        getContentById,
+        createContent,
+        updateContent,
+        updateStatus,
+        deleteContent,
+        setCurrentItem,
+        getItems,
+        getCurrentItem,
+        getTypes,
+        getStatuses,
+        isLoading,
+        getState
+    };
+
+    document.addEventListener(
+        "echoes-admin-edit-content",
+        function (event) {
+            const item =
+                event.detail && event.detail.item;
+
+            enterEditMode(item).catch(function (error) {
+                console.error(
+                    "Admin V3 Content: Edit mode initialization failed.",
+                    error
+                );
+
+                showFormMessage(
+                    error.message ||
+                        "Content could not be opened for editing.",
+                    true
+                );
+            });
+        }
+    );
+
+    document.addEventListener("echoes-admin-ready", function () {
+        initializeContentUI().catch(function (error) {
+            console.error(
+                "Admin V3 Content: UI initialization failed.",
+                error
+            );
+
+            showFormMessage(
+                error.message ||
+                    "Content UI initialization failed.",
+                true
+            );
+        });
+    });
+
+    document.addEventListener(
+        "echoes-admin-module-change",
+        function (event) {
+            if (
+                event.detail &&
+                event.detail.moduleId === "content"
+            ) {
+                loadCategoryOptions();
+            }
+        }
+    );
+})();
